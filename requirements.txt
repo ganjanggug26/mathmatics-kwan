@@ -1,0 +1,6 @@
+streamlit>=1.57
+sympy>=1.12
+numpy>=1.26
+pandas>=2.2
+plotly>=5.22
+tabulate>=0.9
