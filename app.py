@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import re
+from html import escape
 from dataclasses import dataclass
 
 import numpy as np
@@ -28,11 +30,11 @@ class AnalysisResult:
     expr: sp.Expr
     first_derivative: sp.Expr
     second_derivative: sp.Expr
-    x_intercepts: list[float]
+    x_intercepts: list[sp.Expr]
     y_intercept: float | None
-    critical_points: list[float]
-    inflection_candidates: list[float]
-    vertical_asymptotes: list[float]
+    critical_points: list[sp.Expr]
+    inflection_candidates: list[sp.Expr]
+    vertical_asymptotes: list[sp.Expr]
 
 
 def parse_function(raw_expression: str) -> sp.Expr:
@@ -50,14 +52,55 @@ def parse_function(raw_expression: str) -> sp.Expr:
     )
 
 
-def real_roots_in_range(expr: sp.Expr, x_min: float, x_max: float, limit: int = 12) -> list[float]:
-    roots: set[float] = set()
+def expr_to_float(value: sp.Expr | float | int) -> float:
+    return float(sp.N(sp.re(value)))
+
+
+def exact_text(value: sp.Expr | float | int) -> str:
+    simplified = sp.nsimplify(value)
+    return sp.sstr(simplified)
+
+
+def math_text(value: sp.Expr | float | int) -> str:
+    text = sp.sstr(sp.nsimplify(value))
+    text = re.sub(r"sqrt\(([^()]+)\)", r"√\1", text)
+    text = text.replace("**", "^")
+    fraction_match = re.fullmatch(r"(-?[^/]+)/([^/]+)", text)
+    if fraction_match:
+        numerator, denominator = fraction_match.groups()
+        return (
+            "<span class='frac'>"
+            f"<span class='num'>{escape(numerator)}</span>"
+            f"<span class='den'>{escape(denominator)}</span>"
+            "</span>"
+        )
+    return escape(text)
+
+
+def merge_points(*point_groups: list[sp.Expr]) -> list[sp.Expr]:
+    points: dict[float, sp.Expr] = {}
+    for group in point_groups:
+        for point in group:
+            try:
+                points[round(expr_to_float(point), 8)] = sp.simplify(point)
+            except Exception:
+                continue
+    return [points[key] for key in sorted(points)]
+
+
+def real_roots_in_range(
+    expr: sp.Expr,
+    x_min: float = -math.inf,
+    x_max: float = math.inf,
+    limit: int = 12,
+) -> list[sp.Expr]:
+    roots: dict[float, sp.Expr] = {}
     try:
         for root in sp.solve(sp.together(expr), x):
-            if root.is_real or abs(float(sp.im(root.evalf()))) < 1e-9:
-                value = float(sp.re(root.evalf()))
+            if root.is_real or abs(expr_to_float(sp.im(root.evalf()))) < 1e-9:
+                value = expr_to_float(root)
                 if x_min <= value <= x_max and math.isfinite(value):
-                    roots.add(round(value, 8))
+                    roots[round(value, 8)] = sp.simplify(root)
     except Exception:
         pass
 
@@ -65,28 +108,28 @@ def real_roots_in_range(expr: sp.Expr, x_min: float, x_max: float, limit: int = 
         try:
             numerator = sp.together(expr).as_numer_denom()[0]
             for root in sp.nroots(numerator, n=30, maxsteps=100):
-                if abs(float(sp.im(root))) < 1e-8:
-                    value = float(sp.re(root))
+                if abs(expr_to_float(sp.im(root))) < 1e-8:
+                    value = expr_to_float(root)
                     if x_min <= value <= x_max and math.isfinite(value):
-                        roots.add(round(value, 8))
+                        roots.setdefault(round(value, 8), sp.nsimplify(value))
         except Exception:
             pass
 
-    return sorted(roots)[:limit]
+    return [roots[key] for key in sorted(roots)[:limit]]
 
 
-def vertical_asymptotes(expr: sp.Expr, x_min: float, x_max: float) -> list[float]:
-    asymptotes: set[float] = set()
+def vertical_asymptotes(expr: sp.Expr, x_min: float = -math.inf, x_max: float = math.inf) -> list[sp.Expr]:
+    asymptotes: dict[float, sp.Expr] = {}
     try:
         denominator = sp.together(expr).as_numer_denom()[1]
         for root in sp.solve(denominator, x):
-            if root.is_real or abs(float(sp.im(root.evalf()))) < 1e-9:
-                value = float(sp.re(root.evalf()))
+            if root.is_real or abs(expr_to_float(sp.im(root.evalf()))) < 1e-9:
+                value = expr_to_float(root)
                 if x_min <= value <= x_max and math.isfinite(value):
-                    asymptotes.add(round(value, 8))
+                    asymptotes[round(value, 8)] = sp.simplify(root)
     except Exception:
         pass
-    return sorted(asymptotes)
+    return [asymptotes[key] for key in sorted(asymptotes)]
 
 
 def finite_eval(function, values: np.ndarray) -> np.ndarray:
@@ -96,15 +139,15 @@ def finite_eval(function, values: np.ndarray) -> np.ndarray:
     return result
 
 
-def analyze(raw_expression: str, x_min: float, x_max: float) -> AnalysisResult:
+def analyze(raw_expression: str) -> AnalysisResult:
     expr = parse_function(raw_expression)
     first_derivative = sp.simplify(sp.diff(expr, x))
     second_derivative = sp.simplify(sp.diff(first_derivative, x))
 
-    x_intercepts = real_roots_in_range(expr, x_min, x_max)
-    critical_points = real_roots_in_range(first_derivative, x_min, x_max)
-    inflection_candidates = real_roots_in_range(second_derivative, x_min, x_max)
-    asymptotes = vertical_asymptotes(expr, x_min, x_max)
+    x_intercepts = real_roots_in_range(expr)
+    critical_points = real_roots_in_range(first_derivative)
+    inflection_candidates = real_roots_in_range(second_derivative)
+    asymptotes = vertical_asymptotes(expr)
 
     y_intercept: float | None
     try:
@@ -135,8 +178,9 @@ def sign_label(value: float) -> str:
     return "0"
 
 
-def interval_table(expr: sp.Expr, split_points: list[float], x_min: float, x_max: float, label: str) -> pd.DataFrame:
-    points = [x_min] + [point for point in split_points if x_min < point < x_max] + [x_max]
+def interval_table(expr: sp.Expr, split_points: list[sp.Expr], x_min: float, x_max: float, label: str) -> pd.DataFrame:
+    numeric_points = [expr_to_float(point) for point in split_points]
+    points = [x_min] + [point for point in numeric_points if x_min < point < x_max] + [x_max]
     function = sp.lambdify(x, expr, "numpy")
     rows: list[dict[str, str]] = []
 
@@ -165,38 +209,269 @@ def interpretation(label: str, sign: str) -> str:
     return {"+" : "아래로 볼록", "-" : "위로 볼록", "0": "변곡 후보"}.get(sign, "추가 확인")
 
 
+def eval_sign(expr: sp.Expr, value: float | sp.Expr) -> str:
+    try:
+        return sign_label(expr_to_float(expr.subs(x, value)))
+    except Exception:
+        return "판정 어려움"
+
+
+def interval_sign(expr: sp.Expr, start: float, end: float) -> str:
+    if not math.isfinite(start) and not math.isfinite(end):
+        sample = 0
+    elif not math.isfinite(start):
+        sample = end - 1
+    elif not math.isfinite(end):
+        sample = start + 1
+    else:
+        sample = (start + end) / 2
+    return eval_sign(expr, sample)
+
+
+def arrow_from_sign(sign: str) -> str:
+    return {"+": "↗", "-": "↘", "0": "→"}.get(sign, "·")
+
+
+def point_kind(result: AnalysisResult, point: sp.Expr) -> str:
+    point_value = round(expr_to_float(point), 8)
+    critical_values = {round(expr_to_float(value), 8) for value in result.critical_points}
+    inflection_values = {round(expr_to_float(value), 8) for value in result.inflection_candidates}
+    asymptote_values = {round(expr_to_float(value), 8) for value in result.vertical_asymptotes}
+
+    labels: list[str] = []
+    if point_value in asymptote_values:
+        labels.append("점근선")
+    if point_value in critical_values:
+        left_sign = eval_sign(result.first_derivative, point_value - 1e-4)
+        right_sign = eval_sign(result.first_derivative, point_value + 1e-4)
+        if left_sign == "+" and right_sign == "-":
+            labels.append("극대")
+        elif left_sign == "-" and right_sign == "+":
+            labels.append("극소")
+        else:
+            labels.append("극값 후보")
+    if point_value in inflection_values:
+        labels.append("변곡점")
+    return ", ".join(labels)
+
+
+def function_value_cell(result: AnalysisResult, point: sp.Expr) -> str:
+    kind = point_kind(result, point)
+    if "점근선" in kind:
+        return "<span class='chart-note'>(점근선)</span>"
+    try:
+        value = sp.simplify(result.expr.subs(x, point))
+        if kind:
+            return f"{math_text(value)}<br><span class='chart-note'>({escape(kind)})</span>"
+        return math_text(value)
+    except Exception:
+        return f"<span class='chart-note'>({escape(kind or '계산 필요')})</span>"
+
+
+def sign_chart_html(result: AnalysisResult) -> str:
+    split_points = merge_points(
+        result.critical_points,
+        result.inflection_candidates,
+        result.vertical_asymptotes,
+    )
+    numeric_points = [expr_to_float(point) for point in split_points]
+    boundaries = [-math.inf] + numeric_points + [math.inf]
+
+    x_cells = ["<th class='row-head'><i>x</i></th>"]
+    first_cells = ["<th class='row-head'><i>f</i>'(<i>x</i>)</th>"]
+    second_cells = ["<th class='row-head'><i>f</i>''(<i>x</i>)</th>"]
+    function_cells = ["<th class='row-head'><i>f</i>(<i>x</i>)</th>"]
+
+    for index, point in enumerate(split_points):
+        start, end = boundaries[index], boundaries[index + 1]
+        first_interval = interval_sign(result.first_derivative, start, end)
+        second_interval = interval_sign(result.second_derivative, start, end)
+
+        x_cells.append("<td class='interval'>⋯</td>")
+        first_cells.append(f"<td class='interval'>{escape(first_interval)}</td>")
+        second_cells.append(f"<td class='interval'>{escape(second_interval)}</td>")
+        function_cells.append(f"<td class='interval arrow'>{arrow_from_sign(first_interval)}</td>")
+
+        x_cells.append(f"<td class='point'>{math_text(point)}</td>")
+        first_cells.append(f"<td class='point'>{escape(eval_sign(result.first_derivative, point))}</td>")
+        second_cells.append(f"<td class='point'>{escape(eval_sign(result.second_derivative, point))}</td>")
+        function_cells.append(f"<td class='point fx'>{function_value_cell(result, point)}</td>")
+
+    final_start, final_end = boundaries[-2], boundaries[-1]
+    first_interval = interval_sign(result.first_derivative, final_start, final_end)
+    second_interval = interval_sign(result.second_derivative, final_start, final_end)
+    x_cells.append("<td class='interval'>⋯</td>")
+    first_cells.append(f"<td class='interval'>{escape(first_interval)}</td>")
+    second_cells.append(f"<td class='interval'>{escape(second_interval)}</td>")
+    function_cells.append(f"<td class='interval arrow'>{arrow_from_sign(first_interval)}</td>")
+
+    return f"""
+<style>
+.sign-chart-wrap {{
+    overflow-x: auto;
+    padding: 0.25rem 0 0.5rem;
+}}
+.sign-chart {{
+    border-collapse: separate;
+    border-spacing: 0;
+    min-width: 780px;
+    width: 100%;
+    table-layout: fixed;
+    border: 1px solid #d6d6d6;
+    border-radius: 10px;
+    overflow: hidden;
+    background: #ffffff;
+    font-size: 1.08rem;
+    text-align: center;
+}}
+.sign-chart th,
+.sign-chart td {{
+    border-right: 1px dotted #b9b9b9;
+    border-bottom: 1px dotted #b9b9b9;
+    min-width: 64px;
+    height: 42px;
+    padding: 0.28rem 0.35rem;
+    vertical-align: middle;
+}}
+.sign-chart tr:last-child th,
+.sign-chart tr:last-child td {{
+    border-bottom: 0;
+}}
+.sign-chart th:last-child,
+.sign-chart td:last-child {{
+    border-right: 0;
+}}
+.sign-chart .row-head {{
+    width: 84px;
+    min-width: 84px;
+    background: #cfe8b1;
+    color: #26351e;
+    font-weight: 700;
+    border-right: 1px solid #d6d6d6;
+}}
+.sign-chart .interval {{
+    color: #525252;
+    background: #fbfbfb;
+}}
+.sign-chart .point {{
+    color: #252525;
+    background: #ffffff;
+    font-weight: 600;
+}}
+.sign-chart .arrow {{
+    font-size: 1.35rem;
+}}
+.sign-chart .fx {{
+    line-height: 1.35;
+    min-height: 58px;
+}}
+.sign-chart .chart-note {{
+    color: #555;
+    font-size: 0.92rem;
+    font-weight: 500;
+}}
+.sign-chart .frac {{
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    line-height: 1.05;
+    vertical-align: middle;
+    min-width: 1.8rem;
+}}
+.sign-chart .frac .num {{
+    border-bottom: 1px solid #555;
+    padding: 0 0.2rem 0.08rem;
+}}
+.sign-chart .frac .den {{
+    padding-top: 0.08rem;
+}}
+</style>
+<div class="sign-chart-wrap">
+  <table class="sign-chart">
+    <tbody>
+      <tr>{''.join(x_cells)}</tr>
+      <tr>{''.join(first_cells)}</tr>
+      <tr>{''.join(second_cells)}</tr>
+      <tr>{''.join(function_cells)}</tr>
+    </tbody>
+  </table>
+</div>
+"""
+
+
 def point_table(result: AnalysisResult) -> pd.DataFrame:
     rows: list[dict[str, str]] = []
     for value in result.x_intercepts:
-        rows.append({"종류": "x절편", "x": f"{value:g}", "y": "0"})
+        rows.append({"종류": "x절편", "x": exact_text(value), "y": "0"})
     if result.y_intercept is not None:
-        rows.append({"종류": "y절편", "x": "0", "y": f"{result.y_intercept:g}"})
+        rows.append({"종류": "y절편", "x": "0", "y": exact_text(result.y_intercept)})
     for value in result.critical_points:
         try:
-            y_value = float(result.expr.subs(x, value).evalf())
-            rows.append({"종류": "극값 후보", "x": f"{value:g}", "y": f"{y_value:g}"})
+            y_value = sp.simplify(result.expr.subs(x, value))
+            rows.append({"종류": point_kind(result, value) or "극값", "x": exact_text(value), "y": exact_text(y_value)})
         except Exception:
-            rows.append({"종류": "극값 후보", "x": f"{value:g}", "y": "계산 필요"})
+            rows.append({"종류": "극값", "x": exact_text(value), "y": "계산 필요"})
     for value in result.inflection_candidates:
         try:
-            y_value = float(result.expr.subs(x, value).evalf())
-            rows.append({"종류": "변곡점 후보", "x": f"{value:g}", "y": f"{y_value:g}"})
+            y_value = sp.simplify(result.expr.subs(x, value))
+            rows.append({"종류": "변곡점", "x": exact_text(value), "y": exact_text(y_value)})
         except Exception:
-            rows.append({"종류": "변곡점 후보", "x": f"{value:g}", "y": "계산 필요"})
+            rows.append({"종류": "변곡점", "x": exact_text(value), "y": "계산 필요"})
     for value in result.vertical_asymptotes:
-        rows.append({"종류": "수직점근선 후보", "x": f"{value:g}", "y": "정의되지 않음"})
+        rows.append({"종류": "수직점근선 후보", "x": exact_text(value), "y": "정의되지 않음"})
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["종류", "x", "y"])
 
 
-def make_graph(result: AnalysisResult, x_min: float, x_max: float, y_clip: float) -> go.Figure:
+def auto_x_window(result: AnalysisResult) -> tuple[float, float]:
+    points = [
+        expr_to_float(point)
+        for point in merge_points(
+            result.x_intercepts,
+            result.critical_points,
+            result.inflection_candidates,
+            result.vertical_asymptotes,
+        )
+    ]
+    if not points:
+        return -6.0, 6.0
+
+    left = min(points)
+    right = max(points)
+    span = max(right - left, 4.0)
+    padding = max(2.0, span * 0.35)
+    return left - padding, right + padding
+
+
+def auto_y_window(ys: np.ndarray) -> tuple[float, float] | None:
+    finite = ys[np.isfinite(ys)]
+    if finite.size == 0:
+        return None
+
+    low, high = np.nanpercentile(finite, [2, 98])
+    if not math.isfinite(low) or not math.isfinite(high):
+        return None
+    if abs(high - low) < 1e-8:
+        padding = max(1.0, abs(high) * 0.3)
+        return low - padding, high + padding
+
+    padding = (high - low) * 0.18
+    return low - padding, high + padding
+
+
+def make_graph(result: AnalysisResult) -> go.Figure:
+    x_min, x_max = auto_x_window(result)
     expression_function = sp.lambdify(x, result.expr, "numpy")
     xs = np.linspace(x_min, x_max, 1600)
 
     for point in result.vertical_asymptotes:
-        xs = xs[np.abs(xs - point) > (x_max - x_min) / 1600]
+        numeric_point = expr_to_float(point)
+        xs = xs[np.abs(xs - numeric_point) > (x_max - x_min) / 1600]
 
     ys = finite_eval(expression_function, xs)
-    ys[np.abs(ys) > y_clip] = np.nan
+    y_window = auto_y_window(ys)
+    if y_window is not None:
+        y_min, y_max = y_window
+        ys[(ys < y_min) | (ys > y_max)] = np.nan
 
     fig = go.Figure()
     fig.add_trace(
@@ -209,32 +484,58 @@ def make_graph(result: AnalysisResult, x_min: float, x_max: float, y_clip: float
         )
     )
 
-    points = point_table(result)
     marker_colors = {
         "x절편": "#0f766e",
         "y절편": "#0f766e",
-        "극값 후보": "#dc2626",
-        "변곡점 후보": "#7c3aed",
+        "극값": "#dc2626",
+        "변곡점": "#7c3aed",
     }
-    for kind, group in points[points["종류"].isin(marker_colors)].groupby("종류"):
-        fig.add_trace(
-            go.Scatter(
-                x=pd.to_numeric(group["x"], errors="coerce"),
-                y=pd.to_numeric(group["y"], errors="coerce"),
-                mode="markers+text",
-                text=[kind] * len(group),
-                textposition="top center",
-                name=kind,
-                marker={"size": 10, "color": marker_colors[kind]},
-            )
+    graph_points: list[dict[str, float | str]] = []
+    for value in result.x_intercepts:
+        graph_points.append(
+            {"종류": "x절편", "x": expr_to_float(value), "y": 0.0, "label": f"x절편<br>x={exact_text(value)}"}
         )
+    if result.y_intercept is not None:
+        graph_points.append({"종류": "y절편", "x": 0.0, "y": result.y_intercept, "label": "y절편<br>x=0"})
+    for kind, values in {
+        "극값": result.critical_points,
+        "변곡점": result.inflection_candidates,
+    }.items():
+        for value in values:
+            try:
+                graph_points.append(
+                    {
+                        "종류": kind,
+                        "x": expr_to_float(value),
+                        "y": expr_to_float(result.expr.subs(x, value)),
+                        "label": f"{kind}<br>x={exact_text(value)}",
+                    }
+                )
+            except Exception:
+                continue
+
+    points = pd.DataFrame(graph_points, columns=["종류", "x", "y", "label"])
+    if not points.empty:
+        for kind, group in points.groupby("종류"):
+            fig.add_trace(
+                go.Scatter(
+                    x=group["x"],
+                    y=group["y"],
+                    mode="markers",
+                    hovertext=group.get("label", pd.Series([kind] * len(group))),
+                    hovertemplate="%{hovertext}<br>y=%{y:.6g}<extra></extra>",
+                    name=kind,
+                    marker={"size": 10, "color": marker_colors[kind]},
+                )
+            )
 
     for point in result.vertical_asymptotes:
+        numeric_point = expr_to_float(point)
         fig.add_vline(
-            x=point,
+            x=numeric_point,
             line_dash="dash",
             line_color="#ea580c",
-            annotation_text=f"x={point:g}",
+            annotation_text=f"x={exact_text(point)}",
             annotation_position="top",
         )
 
@@ -248,7 +549,8 @@ def make_graph(result: AnalysisResult, x_min: float, x_max: float, y_clip: float
         yaxis_title="y",
         template="plotly_white",
     )
-    fig.update_yaxes(range=[-y_clip, y_clip])
+    if y_window is not None:
+        fig.update_yaxes(range=list(y_window))
     return fig
 
 
@@ -284,36 +586,21 @@ def main() -> None:
 
     with st.sidebar:
         st.header("함수 입력")
-        example = st.selectbox(
-            "예시 선택",
-            [
-                "x/(x^2+1)",
-                "x^3 - 3*x",
-                "x^4 - 4*x^2",
-                "sin(x)",
-                "exp(-x^2)",
-            ],
-        )
-        raw_expression = st.text_input("f(x)", value=example)
-        st.divider()
-        x_min, x_max = st.slider("x 범위", -20.0, 20.0, (-6.0, 6.0), 0.5)
-        y_clip = st.slider("y 표시 범위", 2.0, 50.0, 8.0, 1.0)
+        raw_expression = st.text_input("f(x)", value="x/(x^2+1)")
         st.info("거듭제곱은 `^` 또는 `**`를 사용할 수 있습니다. 예: `x/(x^2+1)`")
 
     try:
-        result = analyze(raw_expression, x_min, x_max)
+        result = analyze(raw_expression)
     except Exception as exc:
         st.error(f"함수식을 해석하지 못했습니다: {exc}")
         st.stop()
 
-    graph_tab, table_tab, reflection_tab, rubric_tab = st.tabs(
-        ["그래프 확인", "증감표 분석", "비교·성찰", "평가 기준"]
-    )
+    graph_tab, table_tab = st.tabs(["그래프 확인", "증감표 분석"])
 
     with graph_tab:
         left, right = st.columns([2.2, 1])
         with left:
-            st.plotly_chart(make_graph(result, x_min, x_max, y_clip), width="stretch")
+            st.plotly_chart(make_graph(result), width="stretch")
         with right:
             st.subheader("미분 결과")
             st.latex(f"f(x) = {sp.latex(result.expr)}")
@@ -322,74 +609,8 @@ def main() -> None:
             st.dataframe(point_table(result), hide_index=True, width="stretch")
 
     with table_tab:
-        st.subheader("증가·감소")
-        st.dataframe(
-            interval_table(
-                result.first_derivative,
-                sorted(set(result.critical_points + result.vertical_asymptotes)),
-                x_min,
-                x_max,
-                "f'(x) 부호",
-            ),
-            hide_index=True,
-            width="stretch",
-        )
-
-        st.subheader("오목·볼록")
-        st.dataframe(
-            interval_table(
-                result.second_derivative,
-                sorted(set(result.inflection_candidates + result.vertical_asymptotes)),
-                x_min,
-                x_max,
-                "f''(x) 부호",
-            ),
-            hide_index=True,
-            width="stretch",
-        )
-
-    with reflection_tab:
-        st.subheader("손그래프와 앱 결과 비교")
-        notes = st.text_area(
-            "차이가 있었다면 원인을 수학적으로 적어보세요.",
-            height=180,
-            placeholder="예: f'(x)의 부호를 잘못 판정해서 감소 구간을 증가 구간으로 표시했다.",
-        )
-        st.download_button(
-            "검증 보고서 내려받기",
-            data=report_text(result, notes),
-            file_name="function_graph_report.md",
-            mime="text/markdown",
-        )
-
-    with rubric_tab:
-        st.subheader("수업 평가 기준")
-        st.dataframe(
-            pd.DataFrame(
-                [
-                    {
-                        "평가 요소": "수학적 추론 및 수행",
-                        "상": "도함수와 이계도함수를 정확히 활용하여 증감, 오목·볼록, 점근선을 반영한다.",
-                        "중": "증감표는 대체로 정확하나 일부 그래프 개형 해석이 미흡하다.",
-                        "하": "미분 계산 또는 부호 조사와 그래프 연결에 어려움이 있다.",
-                    },
-                    {
-                        "평가 요소": "정보처리 역량",
-                        "상": "웹 앱 결과를 극값, 변곡점 등 수학 개념과 연결하여 설명한다.",
-                        "중": "그래프는 도출하지만 수학적 해석에는 일부 도움이 필요하다.",
-                        "하": "교사의 도움 없이는 도구 활용이 어렵다.",
-                    },
-                    {
-                        "평가 요소": "비판적 사고 및 성찰",
-                        "상": "손그래프와 앱 결과의 차이를 근거 있게 분석하고 수정한다.",
-                        "중": "오류 지점은 찾지만 수정 과정에 피드백이 필요하다.",
-                        "하": "차이를 발견하거나 원인을 설명하는 데 어려움이 있다.",
-                    },
-                ]
-            ),
-            hide_index=True,
-            width="stretch",
-        )
+        st.subheader("증감표")
+        st.markdown(sign_chart_html(result), unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
