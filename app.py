@@ -306,7 +306,7 @@ def point_kind(result: AnalysisResult, point: sp.Expr) -> str:
         elif left_sign == "-" and right_sign == "+":
             labels.append("극소")
         else:
-            labels.append("극값 후보")
+            labels.append("극점")
     if point_value in inflection_values:
         labels.append("변곡점")
     return ", ".join(labels)
@@ -378,7 +378,7 @@ def sign_chart_html(result: AnalysisResult) -> str:
     min-width: 780px;
     width: 100%;
     table-layout: fixed;
-    border: 1px solid #d6d6d6;
+    border: 2px solid #c7c7c7;
     border-radius: 10px;
     overflow: hidden;
     background: #ffffff;
@@ -388,8 +388,8 @@ def sign_chart_html(result: AnalysisResult) -> str:
 }}
 .sign-chart th,
 .sign-chart td {{
-    border-right: 1px dotted #b9b9b9;
-    border-bottom: 1px dotted #b9b9b9;
+    border-right: 1.6px solid #d0d0d0;
+    border-bottom: 1.6px solid #d0d0d0;
     min-width: 64px;
     height: 46px;
     padding: 0.22rem 0.35rem;
@@ -410,7 +410,7 @@ def sign_chart_html(result: AnalysisResult) -> str:
     color: #26351e;
     font-weight: 400;
     font-style: normal;
-    border-right: 1px solid #d6d6d6;
+    border-right: 2px solid #c7c7c7;
 }}
 .sign-chart .interval {{
     color: #525252;
@@ -462,9 +462,9 @@ def point_table(result: AnalysisResult) -> pd.DataFrame:
     for value in result.critical_points:
         try:
             y_value = sp.simplify(result.expr.subs(x, value))
-            rows.append({"종류": point_kind(result, value) or "극값", "x": exact_text(value), "y": exact_text(y_value)})
+            rows.append({"종류": point_kind(result, value) or "극점", "x": exact_text(value), "y": exact_text(y_value)})
         except Exception:
-            rows.append({"종류": "극값", "x": exact_text(value), "y": "계산 필요"})
+            rows.append({"종류": "극점", "x": exact_text(value), "y": "계산 필요"})
     for value in result.inflection_candidates:
         try:
             y_value = sp.simplify(result.expr.subs(x, value))
@@ -512,7 +512,49 @@ def auto_y_window(ys: np.ndarray) -> tuple[float, float] | None:
     return low - padding, high + padding
 
 
-def make_graph(result: AnalysisResult) -> go.Figure:
+def add_axis_coordinate_guides(fig: go.Figure, points: list[tuple[sp.Expr, sp.Expr]], color: str) -> None:
+    for x_value, y_value in points:
+        numeric_x = expr_to_float(x_value)
+        numeric_y = expr_to_float(y_value)
+        x_label = exact_text(x_value)
+        y_label = exact_text(y_value)
+        fig.add_shape(
+            type="line",
+            x0=numeric_x,
+            x1=numeric_x,
+            y0=0,
+            y1=numeric_y,
+            line={"color": color, "width": 1.5, "dash": "dot"},
+        )
+        fig.add_shape(
+            type="line",
+            x0=0,
+            x1=numeric_x,
+            y0=numeric_y,
+            y1=numeric_y,
+            line={"color": color, "width": 1.5, "dash": "dot"},
+        )
+        fig.add_annotation(
+            x=numeric_x,
+            y=0,
+            text=f"x={x_label}",
+            showarrow=False,
+            yshift=-18,
+            font={"size": 12, "color": color},
+            bgcolor="rgba(255,255,255,0.82)",
+        )
+        fig.add_annotation(
+            x=0,
+            y=numeric_y,
+            text=f"y={y_label}",
+            showarrow=False,
+            xshift=36,
+            font={"size": 12, "color": color},
+            bgcolor="rgba(255,255,255,0.82)",
+        )
+
+
+def make_graph(result: AnalysisResult, show_extrema_coordinates: bool, show_inflection_coordinates: bool) -> go.Figure:
     x_min, x_max = auto_x_window(result)
     expression_function = sp.lambdify(x, result.expr, "numpy")
     xs = np.linspace(x_min, x_max, 1600)
@@ -541,7 +583,7 @@ def make_graph(result: AnalysisResult) -> go.Figure:
     marker_colors = {
         "x절편": "#0f766e",
         "y절편": "#0f766e",
-        "극값": "#dc2626",
+        "극점": "#dc2626",
         "변곡점": "#7c3aed",
     }
     graph_points: list[dict[str, float | str]] = []
@@ -552,7 +594,7 @@ def make_graph(result: AnalysisResult) -> go.Figure:
     if result.y_intercept is not None:
         graph_points.append({"종류": "y절편", "x": 0.0, "y": result.y_intercept, "label": "y절편<br>x=0"})
     for kind, values in {
-        "극값": result.critical_points,
+        "극점": result.critical_points,
         "변곡점": result.inflection_candidates,
     }.items():
         for value in values:
@@ -595,6 +637,25 @@ def make_graph(result: AnalysisResult) -> go.Figure:
 
     fig.add_hline(y=0, line_color="#94a3b8", line_width=1)
     fig.add_vline(x=0, line_color="#94a3b8", line_width=1)
+
+    if show_extrema_coordinates:
+        extrema_points = []
+        for point in result.critical_points:
+            try:
+                extrema_points.append((point, sp.simplify(result.expr.subs(x, point))))
+            except Exception:
+                continue
+        add_axis_coordinate_guides(fig, extrema_points, "#dc2626")
+
+    if show_inflection_coordinates:
+        inflection_points = []
+        for point in result.inflection_candidates:
+            try:
+                inflection_points.append((point, sp.simplify(result.expr.subs(x, point))))
+            except Exception:
+                continue
+        add_axis_coordinate_guides(fig, inflection_points, "#7c3aed")
+
     fig.update_layout(
         height=560,
         margin={"l": 20, "r": 20, "t": 20, "b": 20},
@@ -642,13 +703,16 @@ def main() -> None:
         st.header("함수 입력")
         input_mode = st.radio("입력 형식", ["일반식", "분수식"], horizontal=True)
         if input_mode == "일반식":
-            raw_expression = st.text_input("f(x)", value="x/(x^2+1)")
+            raw_expression = st.text_input("f(x)", value="sin(x)")
         else:
             numerator = st.text_input("분자", value="x")
             denominator = st.text_input("분모", value="x^2+1")
             raw_expression = f"({numerator})/({denominator})"
             st.caption(f"적용식: `{raw_expression}`")
         st.info("거듭제곱은 `^` 또는 `**`를 사용할 수 있습니다. 예: `x/(x^2+1)`")
+        st.divider()
+        show_extrema_coordinates = st.toggle("극점 좌표를 축에 표시", value=False)
+        show_inflection_coordinates = st.toggle("변곡점 좌표를 축에 표시", value=False)
 
     try:
         result = analyze(raw_expression)
@@ -661,7 +725,10 @@ def main() -> None:
     with graph_tab:
         left, right = st.columns([2.2, 1])
         with left:
-            st.plotly_chart(make_graph(result), width="stretch")
+            st.plotly_chart(
+                make_graph(result, show_extrema_coordinates, show_inflection_coordinates),
+                width="stretch",
+            )
         with right:
             st.subheader("미분 결과")
             st.latex(f"f(x) = {sp.latex(result.expr)}")
