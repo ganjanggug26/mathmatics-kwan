@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import math
 import re
+import base64
+from io import BytesIO
 from html import escape
 from dataclasses import dataclass
+from functools import lru_cache
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -46,7 +50,7 @@ def parse_function(raw_expression: str) -> sp.Expr:
     return sp.simplify(
         parse_expr(
             cleaned,
-            local_dict={"x": x, "e": sp.E, "pi": sp.pi},
+            local_dict={"x": x, "e": sp.E, "pi": sp.pi, "ln": sp.log, "log": sp.log},
             transformations=TRANSFORMATIONS,
         )
     )
@@ -56,25 +60,78 @@ def expr_to_float(value: sp.Expr | float | int) -> float:
     return float(sp.N(sp.re(value)))
 
 
+def pretty_text(value: sp.Expr | float | int) -> str:
+    text = sp.sstr(sp.nsimplify(value))
+    text = re.sub(r"sqrt\(([^()]+)\)", r"√\1", text)
+    return text.replace("**", "^")
+
+
 def exact_text(value: sp.Expr | float | int) -> str:
-    simplified = sp.nsimplify(value)
-    return sp.sstr(simplified)
+    return pretty_text(value)
+
+
+def pretty_html(value: sp.Expr | float | int | str) -> str:
+    text = escape(str(value).replace("**", "^"))
+    text = re.sub(
+        r"sqrt\(([^()]+)\)",
+        lambda match: (
+            "<span class='sqrt-expr'>"
+            "<span class='sqrt-symbol'>√</span>"
+            f"<span class='radicand'>{escape(match.group(1))}</span>"
+            "</span>"
+        ),
+        text,
+    )
+    text = re.sub(
+        r"√([A-Za-z0-9]+)",
+        lambda match: (
+            "<span class='sqrt-expr'>"
+            "<span class='sqrt-symbol'>√</span>"
+            f"<span class='radicand'>{escape(match.group(1))}</span>"
+            "</span>"
+        ),
+        text,
+    )
+    return text
 
 
 def math_text(value: sp.Expr | float | int) -> str:
     text = sp.sstr(sp.nsimplify(value))
-    text = re.sub(r"sqrt\(([^()]+)\)", r"√\1", text)
-    text = text.replace("**", "^")
     fraction_match = re.fullmatch(r"(-?[^/]+)/([^/]+)", text)
     if fraction_match:
         numerator, denominator = fraction_match.groups()
         return (
             "<span class='frac'>"
-            f"<span class='num'>{escape(numerator)}</span>"
-            f"<span class='den'>{escape(denominator)}</span>"
+            f"<span class='num'>{pretty_html(numerator)}</span>"
+            f"<span class='den'>{pretty_html(denominator)}</span>"
             "</span>"
         )
-    return escape(text)
+    return pretty_html(text)
+
+
+@lru_cache(maxsize=256)
+def math_svg(latex: str, width: int | None = None) -> str:
+    fig = plt.figure(figsize=(0.01, 0.01), dpi=220)
+    fig.patch.set_alpha(0)
+    text = fig.text(
+        0,
+        0,
+        f"${latex}$",
+        fontsize=15,
+        color="#202020",
+        fontfamily="serif",
+        math_fontfamily="cm",
+    )
+    buffer = BytesIO()
+    fig.savefig(buffer, format="svg", bbox_inches="tight", pad_inches=0.02, transparent=True)
+    plt.close(fig)
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    style = f"width:{width}px;" if width else ""
+    return f"<img class='math-svg' style='{style}' src='data:image/svg+xml;base64,{encoded}' alt='{escape(latex)}'>"
+
+
+def expr_svg(value: sp.Expr | float | int, width: int | None = None) -> str:
+    return math_svg(sp.latex(sp.nsimplify(value)), width=width)
 
 
 def merge_points(*point_groups: list[sp.Expr]) -> list[sp.Expr]:
@@ -262,8 +319,8 @@ def function_value_cell(result: AnalysisResult, point: sp.Expr) -> str:
     try:
         value = sp.simplify(result.expr.subs(x, point))
         if kind:
-            return f"{math_text(value)}<br><span class='chart-note'>({escape(kind)})</span>"
-        return math_text(value)
+            return f"{expr_svg(value)}<br><span class='chart-note'>({escape(kind)})</span>"
+        return expr_svg(value)
     except Exception:
         return f"<span class='chart-note'>({escape(kind or '계산 필요')})</span>"
 
@@ -277,10 +334,14 @@ def sign_chart_html(result: AnalysisResult) -> str:
     numeric_points = [expr_to_float(point) for point in split_points]
     boundaries = [-math.inf] + numeric_points + [math.inf]
 
-    x_cells = ["<th class='row-head'><i>x</i></th>"]
-    first_cells = ["<th class='row-head'><i>f</i>'(<i>x</i>)</th>"]
-    second_cells = ["<th class='row-head'><i>f</i>''(<i>x</i>)</th>"]
-    function_cells = ["<th class='row-head'><i>f</i>(<i>x</i>)</th>"]
+    x_head = math_svg("x", width=18)
+    first_head = math_svg("f'(x)", width=54)
+    second_head = math_svg("f''(x)", width=58)
+    function_head = math_svg("f(x)", width=48)
+    x_cells = [f"<th class='row-head'>{x_head}</th>"]
+    first_cells = [f"<th class='row-head'>{first_head}</th>"]
+    second_cells = [f"<th class='row-head'>{second_head}</th>"]
+    function_cells = [f"<th class='row-head'>{function_head}</th>"]
 
     for index, point in enumerate(split_points):
         start, end = boundaries[index], boundaries[index + 1]
@@ -292,7 +353,7 @@ def sign_chart_html(result: AnalysisResult) -> str:
         second_cells.append(f"<td class='interval'>{escape(second_interval)}</td>")
         function_cells.append(f"<td class='interval arrow'>{arrow_from_sign(first_interval)}</td>")
 
-        x_cells.append(f"<td class='point'>{math_text(point)}</td>")
+        x_cells.append(f"<td class='point'>{expr_svg(point)}</td>")
         first_cells.append(f"<td class='point'>{escape(eval_sign(result.first_derivative, point))}</td>")
         second_cells.append(f"<td class='point'>{escape(eval_sign(result.second_derivative, point))}</td>")
         function_cells.append(f"<td class='point fx'>{function_value_cell(result, point)}</td>")
@@ -323,14 +384,15 @@ def sign_chart_html(result: AnalysisResult) -> str:
     background: #ffffff;
     font-size: 1.08rem;
     text-align: center;
+    font-family: "Noto Sans KR", "Malgun Gothic", Arial, sans-serif;
 }}
 .sign-chart th,
 .sign-chart td {{
     border-right: 1px dotted #b9b9b9;
     border-bottom: 1px dotted #b9b9b9;
     min-width: 64px;
-    height: 42px;
-    padding: 0.28rem 0.35rem;
+    height: 46px;
+    padding: 0.22rem 0.35rem;
     vertical-align: middle;
 }}
 .sign-chart tr:last-child th,
@@ -346,7 +408,8 @@ def sign_chart_html(result: AnalysisResult) -> str:
     min-width: 84px;
     background: #cfe8b1;
     color: #26351e;
-    font-weight: 700;
+    font-weight: 400;
+    font-style: normal;
     border-right: 1px solid #d6d6d6;
 }}
 .sign-chart .interval {{
@@ -362,28 +425,19 @@ def sign_chart_html(result: AnalysisResult) -> str:
     font-size: 1.35rem;
 }}
 .sign-chart .fx {{
-    line-height: 1.35;
-    min-height: 58px;
+    line-height: 1.2;
+    min-height: 68px;
 }}
 .sign-chart .chart-note {{
-    color: #555;
-    font-size: 0.92rem;
+    color: #333;
+    font-size: 0.9rem;
     font-weight: 500;
 }}
-.sign-chart .frac {{
-    display: inline-flex;
-    flex-direction: column;
-    align-items: center;
-    line-height: 1.05;
+.sign-chart .math-svg {{
+    display: inline-block;
+    max-width: 100%;
+    height: auto;
     vertical-align: middle;
-    min-width: 1.8rem;
-}}
-.sign-chart .frac .num {{
-    border-bottom: 1px solid #555;
-    padding: 0 0.2rem 0.08rem;
-}}
-.sign-chart .frac .den {{
-    padding-top: 0.08rem;
 }}
 </style>
 <div class="sign-chart-wrap">
@@ -586,7 +640,14 @@ def main() -> None:
 
     with st.sidebar:
         st.header("함수 입력")
-        raw_expression = st.text_input("f(x)", value="x/(x^2+1)")
+        input_mode = st.radio("입력 형식", ["일반식", "분수식"], horizontal=True)
+        if input_mode == "일반식":
+            raw_expression = st.text_input("f(x)", value="x/(x^2+1)")
+        else:
+            numerator = st.text_input("분자", value="x")
+            denominator = st.text_input("분모", value="x^2+1")
+            raw_expression = f"({numerator})/({denominator})"
+            st.caption(f"적용식: `{raw_expression}`")
         st.info("거듭제곱은 `^` 또는 `**`를 사용할 수 있습니다. 예: `x/(x^2+1)`")
 
     try:
@@ -606,7 +667,6 @@ def main() -> None:
             st.latex(f"f(x) = {sp.latex(result.expr)}")
             st.latex(f"f'(x) = {sp.latex(result.first_derivative)}")
             st.latex(f"f''(x) = {sp.latex(result.second_derivative)}")
-            st.dataframe(point_table(result), hide_index=True, width="stretch")
 
     with table_tab:
         st.subheader("증감표")
