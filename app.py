@@ -703,16 +703,31 @@ def main() -> None:
         st.header("함수 입력")
         input_mode = st.radio("입력 형식", ["일반식", "분수식"], horizontal=True)
         if input_mode == "일반식":
-            raw_expression = st.text_input("f(x)", value="sin(x)")
+            raw_expression = st.text_input("f(x)", value="", placeholder="예: sin(x), ln(x), x/(x^2+1)")
         else:
-            numerator = st.text_input("분자", value="x")
-            denominator = st.text_input("분모", value="x^2+1")
-            raw_expression = f"({numerator})/({denominator})"
-            st.caption(f"적용식: `{raw_expression}`")
+            numerator = st.text_input("분자", value="", placeholder="예: x")
+            denominator = st.text_input("분모", value="", placeholder="예: x^2+1")
+            raw_expression = f"({numerator})/({denominator})" if numerator.strip() and denominator.strip() else ""
+            if raw_expression:
+                st.caption(f"적용식: `{raw_expression}`")
         st.info("거듭제곱은 `^` 또는 `**`를 사용할 수 있습니다. 예: `x/(x^2+1)`")
         st.divider()
         show_extrema_coordinates = st.toggle("극점 좌표를 축에 표시", value=False)
         show_inflection_coordinates = st.toggle("변곡점 좌표를 축에 표시", value=False)
+
+    if not raw_expression.strip():
+        st.markdown(
+            """
+            <div style="border:1px solid #d9e2ec;border-radius:10px;padding:2rem;background:#ffffff;">
+              <h3 style="margin-top:0;">함수식을 입력하면 그래프와 증감표가 생성됩니다.</h3>
+              <p style="margin-bottom:0;color:#52616b;">
+                왼쪽 입력창에 일반식 또는 분수식을 넣어주세요. 예: <code>sin(x)</code>, <code>ln(x)</code>, <code>x/(x^2+1)</code>
+              </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.stop()
 
     try:
         result = analyze(raw_expression)
