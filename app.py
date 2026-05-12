@@ -285,8 +285,33 @@ def interval_sign(expr: sp.Expr, start: float, end: float) -> str:
     return eval_sign(expr, sample)
 
 
-def arrow_from_sign(sign: str) -> str:
-    return {"+": "↗", "-": "↘", "0": "→"}.get(sign, "·")
+def curve_arrow(first_sign: str, second_sign: str) -> str:
+    paths = {
+        ("+", "+"): "M7 43 C17 42 31 31 49 7",
+        ("+", "-"): "M7 43 C18 15 34 7 49 7",
+        ("-", "+"): "M7 7 C18 34 34 43 49 43",
+        ("-", "-"): "M7 7 C20 7 38 18 49 43",
+        ("0", "+"): "M7 25 C20 24 34 18 49 7",
+        ("0", "-"): "M7 25 C20 26 34 32 49 43",
+    }
+    path = paths.get((first_sign, second_sign), "M7 25 L49 25")
+    marker_key = {
+        "+": "plus",
+        "-": "minus",
+        "0": "zero",
+    }
+    marker_id = f"arrowhead-{marker_key.get(first_sign, 'unknown')}-{marker_key.get(second_sign, 'unknown')}"
+    return f"""
+    <svg class="curve-arrow" viewBox="0 0 56 50" aria-hidden="true">
+      <defs>
+        <marker id="{marker_id}" markerWidth="7" markerHeight="7" refX="5.6" refY="3.5" orient="auto">
+          <path d="M0,0 L7,3.5 L0,7 Z" fill="#404040"></path>
+        </marker>
+      </defs>
+      <path d="{path}" fill="none" stroke="#404040" stroke-width="2.2" stroke-linecap="round"
+            marker-end="url(#{marker_id})"></path>
+    </svg>
+    """
 
 
 def point_kind(result: AnalysisResult, point: sp.Expr) -> str:
@@ -351,7 +376,7 @@ def sign_chart_html(result: AnalysisResult) -> str:
         x_cells.append("<td class='interval'>⋯</td>")
         first_cells.append(f"<td class='interval'>{escape(first_interval)}</td>")
         second_cells.append(f"<td class='interval'>{escape(second_interval)}</td>")
-        function_cells.append(f"<td class='interval arrow'>{arrow_from_sign(first_interval)}</td>")
+        function_cells.append(f"<td class='interval arrow'>{curve_arrow(first_interval, second_interval)}</td>")
 
         x_cells.append(f"<td class='point'>{expr_svg(point)}</td>")
         first_cells.append(f"<td class='point'>{escape(eval_sign(result.first_derivative, point))}</td>")
@@ -364,7 +389,7 @@ def sign_chart_html(result: AnalysisResult) -> str:
     x_cells.append("<td class='interval'>⋯</td>")
     first_cells.append(f"<td class='interval'>{escape(first_interval)}</td>")
     second_cells.append(f"<td class='interval'>{escape(second_interval)}</td>")
-    function_cells.append(f"<td class='interval arrow'>{arrow_from_sign(first_interval)}</td>")
+    function_cells.append(f"<td class='interval arrow'>{curve_arrow(first_interval, second_interval)}</td>")
 
     return f"""
 <style>
@@ -422,7 +447,13 @@ def sign_chart_html(result: AnalysisResult) -> str:
     font-weight: 600;
 }}
 .sign-chart .arrow {{
-    font-size: 1.35rem;
+    padding: 0.1rem 0.2rem;
+}}
+.sign-chart .curve-arrow {{
+    width: 54px;
+    height: 44px;
+    display: inline-block;
+    vertical-align: middle;
 }}
 .sign-chart .fx {{
     line-height: 1.2;
@@ -496,6 +527,31 @@ def auto_x_window(result: AnalysisResult) -> tuple[float, float]:
     return left - padding, right + padding
 
 
+def graph_sample_window(initial_window: tuple[float, float], result: AnalysisResult) -> tuple[float, float]:
+    left, right = initial_window
+    center = (left + right) / 2
+    visible_width = max(right - left, 12.0)
+    sample_width = max(1000.0, visible_width * 30)
+
+    important_points = [
+        expr_to_float(point)
+        for point in merge_points(
+            result.x_intercepts,
+            result.critical_points,
+            result.inflection_candidates,
+            result.vertical_asymptotes,
+        )
+    ]
+    if important_points:
+        point_left = min(important_points)
+        point_right = max(important_points)
+        sample_left = min(center - sample_width / 2, point_left - visible_width * 2)
+        sample_right = max(center + sample_width / 2, point_right + visible_width * 2)
+        return sample_left, sample_right
+
+    return center - sample_width / 2, center + sample_width / 2
+
+
 def auto_y_window(ys: np.ndarray) -> tuple[float, float] | None:
     finite = ys[np.isfinite(ys)]
     if finite.size == 0:
@@ -555,19 +611,18 @@ def add_axis_coordinate_guides(fig: go.Figure, points: list[tuple[sp.Expr, sp.Ex
 
 
 def make_graph(result: AnalysisResult, show_extrema_coordinates: bool, show_inflection_coordinates: bool) -> go.Figure:
-    x_min, x_max = auto_x_window(result)
+    initial_x_min, initial_x_max = auto_x_window(result)
+    x_min, x_max = graph_sample_window((initial_x_min, initial_x_max), result)
     expression_function = sp.lambdify(x, result.expr, "numpy")
-    xs = np.linspace(x_min, x_max, 1600)
+    xs = np.linspace(x_min, x_max, 10000)
 
     for point in result.vertical_asymptotes:
         numeric_point = expr_to_float(point)
         xs = xs[np.abs(xs - numeric_point) > (x_max - x_min) / 1600]
 
     ys = finite_eval(expression_function, xs)
-    y_window = auto_y_window(ys)
-    if y_window is not None:
-        y_min, y_max = y_window
-        ys[(ys < y_min) | (ys > y_max)] = np.nan
+    visible_mask = (xs >= initial_x_min) & (xs <= initial_x_max)
+    y_window = auto_y_window(ys[visible_mask])
 
     fig = go.Figure()
     fig.add_trace(
@@ -664,6 +719,7 @@ def make_graph(result: AnalysisResult, show_extrema_coordinates: bool, show_infl
         yaxis_title="y",
         template="plotly_white",
     )
+    fig.update_xaxes(range=[initial_x_min, initial_x_max])
     if y_window is not None:
         fig.update_yaxes(range=list(y_window))
     return fig
